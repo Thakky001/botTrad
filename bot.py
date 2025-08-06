@@ -1,7 +1,10 @@
 import json
 import time
 import numpy as np
+import threading
+import os
 from websocket import WebSocketApp
+from flask import Flask, jsonify
 
 # ============ CONFIG ============
 API_TOKEN = "2RWXvgHrmYOX1oQ"
@@ -24,6 +27,19 @@ wins = 0
 losses = 0
 consecutive_losses = 0
 pause_until = 0
+
+app = Flask(__name__)
+
+@app.route("/")
+def status():
+    return jsonify({
+        "status": "running",
+        "symbol": symbol,
+        "trades": total_trades,
+        "wins": wins,
+        "losses": losses,
+        "consecutive_losses": consecutive_losses
+    })
 
 # --- EMA ---
 def ema(values, period):
@@ -84,7 +100,7 @@ def is_sideway():
     recent_range = max(price_history[-20:]) - min(price_history[-20:])
     avg_price = np.mean(price_history[-20:])
     volatility = recent_range / avg_price
-    print(f"📛 Sideway Check: Range={recent_range:.5f}, Volatility={volatility:.5f}")
+    print(f"\U0001f6db Sideway Check: Range={recent_range:.5f}, Volatility={volatility:.5f}")
     return volatility < 0.002
 
 # --- Trend Filter ---
@@ -92,7 +108,7 @@ def get_trend_bias():
     ema_50 = ema(price_history[-60:], 50)
     ema_20 = ema(price_history[-60:], 20)
     if ema_20 and ema_50:
-        print(f"📈 Trend Check: EMA20={ema_20}, EMA50={ema_50}")
+        print(f"\U0001f4c8 Trend Check: EMA20={ema_20}, EMA50={ema_50}")
         if ema_20 > ema_50:
             return "UP"
         elif ema_20 < ema_50:
@@ -109,12 +125,11 @@ def get_trade_signal():
     rsi_value = rsi(price_history)
     upper, sma, lower = bollinger_bands(price_history)
 
-    print(f"📊 EMA5={ema_fast}, EMA20={ema_slow}, MACD={macd_line}, Signal={signal_line}, RSI={rsi_value}")
+    print(f"\U0001f4ca EMA5={ema_fast}, EMA20={ema_slow}, MACD={macd_line}, Signal={signal_line}, RSI={rsi_value}")
 
     if None in (ema_fast, ema_slow, macd_line, signal_line, rsi_value, upper, lower):
         return None
 
-    # FILTER 1: MACD + EMA
     if macd_line > signal_line and ema_fast > ema_slow and rsi_value < 70 and price_history[-1] < upper:
         return "CALL"
     elif macd_line < signal_line and ema_fast < ema_slow and rsi_value > 30 and price_history[-1] > lower:
@@ -138,7 +153,7 @@ def send_trade(ws, contract_type):
         }
     }
     ws.send(json.dumps(trade))
-    print("🚀 Trade sent:", contract_type)
+    print("\U0001f680 Trade sent:", contract_type)
     active_contract_id = None
 
 # --- อัปเดตผล ---
@@ -154,7 +169,7 @@ def update_result(result):
         if consecutive_losses >= max_consecutive_losses:
             pause_until = time.time() + pause_duration_sec
             print("🛑 Too many losses — Pausing for 5 mins.")
-    print(f"🎯 Result: {result} | Total: {total_trades} | ✅ Wins: {wins} | ❌ Losses: {losses}")
+    print(f"🏆 Result: {result} | Total: {total_trades} | ✅ Wins: {wins} | ❌ Losses: {losses}")
 
 # --- WebSocket Events ---
 def on_open(ws):
@@ -245,4 +260,8 @@ def run_bot():
     )
     ws.run_forever()
 
-run_bot()
+# --- Run both bot + API ---
+if __name__ == '__main__':
+    threading.Thread(target=run_bot).start()
+    port = int(os.environ.get("PORT", 10000))
+    app.run(host='0.0.0.0', port=port)
