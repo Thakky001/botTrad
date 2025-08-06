@@ -28,6 +28,7 @@ losses = 0
 consecutive_losses = 0
 pause_until = 0
 
+# === Flask API ===
 app = Flask(__name__)
 
 @app.route("/")
@@ -40,6 +41,10 @@ def status():
         "losses": losses,
         "consecutive_losses": consecutive_losses
     })
+
+@app.route('/favicon.ico')
+def favicon():
+    return '', 204
 
 # --- EMA ---
 def ema(values, period):
@@ -260,7 +265,7 @@ def run_bot():
     )
     ws.run_forever()
 
-# --- Run both bot + API ---
+# --- Run bot + Flask ---
 if __name__ == '__main__':
     threading.Thread(target=run_bot).start()
     port = int(os.environ.get("PORT", 10000))
