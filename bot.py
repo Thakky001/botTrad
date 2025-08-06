@@ -7,7 +7,7 @@ from websocket import WebSocketApp
 from flask import Flask, jsonify
 
 # ============ CONFIG ============
-API_TOKEN = "2RWXvgHrmYOX1oQ"
+API_TOKEN = "C82t0gtcRoQv99X"
 amount = 100
 symbol = "R_100"
 duration = 1  # 1 นาที
