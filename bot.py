@@ -100,13 +100,25 @@ def calculate_macd(prices):
 
 # --- Sideway Filter ---
 def is_sideway():
+    # 1) ถ้าประวัติราคาน้อยกว่า 20 จุด (tick) ให้ถือว่าตลาด sideway ไปก่อน
     if len(price_history) < 20:
         return True
+
+    # 2) คำนวณช่วงราคาสูงสุด - ต่ำสุด ใน 20 จุดล่าสุด
     recent_range = max(price_history[-20:]) - min(price_history[-20:])
+
+    # 3) หาค่าเฉลี่ยราคาของ 20 จุดล่าสุด
     avg_price = np.mean(price_history[-20:])
+
+    # 4) คำนวณความผันผวน (volatility) = ช่วงราคา / ราคาเฉลี่ย
     volatility = recent_range / avg_price
-    print(f"\U0001f6db Sideway Check: Range={recent_range:.5f}, Volatility={volatility:.5f}")
+
+    # 5) พิมพ์ log เพื่อดูค่าช่วงราคาและความผันผวน
+    print(f"🚛 Sideway Check: Range={recent_range:.5f}, Volatility={volatility:.5f}")
+
+    # 6) ถ้าความผันผวน < 0.002 (0.2%) ให้ถือว่าเป็น sideway
     return volatility < 0.002
+
 
 # --- Trend Filter ---
 def get_trend_bias():
@@ -143,7 +155,6 @@ def get_trade_signal():
 
 # --- ส่งคำสั่งเทรด ---
 def send_trade(ws, contract_type):
-    global active_contract_id
     trade = {
         "buy": 1,
         "price": amount,
@@ -159,12 +170,12 @@ def send_trade(ws, contract_type):
     }
     ws.send(json.dumps(trade))
     print("\U0001f680 Trade sent:", contract_type)
-    active_contract_id = None
 
 # --- อัปเดตผล ---
-def update_result(result):
+def update_result(result, profit):
     global total_trades, wins, losses, consecutive_losses, pause_until
     total_trades += 1
+
     if result == "WIN":
         wins += 1
         consecutive_losses = 0
@@ -174,7 +185,18 @@ def update_result(result):
         if consecutive_losses >= max_consecutive_losses:
             pause_until = time.time() + pause_duration_sec
             print("🛑 Too many losses — Pausing for 5 mins.")
-    print(f"🏆 Result: {result} | Total: {total_trades} | ✅ Wins: {wins} | ❌ Losses: {losses}")
+
+    win_rate = (wins / total_trades) * 100 if total_trades > 0 else 0
+
+    print("\n===== 📊 SUMMARY AFTER TRADE =====")
+    print(f"📌 Result         : {result}")
+    print(f"💰 Profit/Loss   : {profit:.2f} USD")
+    print(f"🧮 Total Trades  : {total_trades}")
+    print(f"✅ Wins          : {wins}")
+    print(f"❌ Losses        : {losses}")
+    print(f"📈 Win Rate      : {win_rate:.2f}%")
+    print(f"⚠️ Consecutive L : {consecutive_losses}")
+    print("=================================\n")
 
 # --- WebSocket Events ---
 def on_open(ws):
@@ -240,7 +262,8 @@ def on_message(ws, message):
         if contract.get("is_sold"):
             profit = contract.get("profit", 0)
             result = "WIN" if profit > 0 else "LOSS"
-            update_result(result)
+            update_result(result, profit)
+            active_contract_id = None  # เคลียร์หลังสัญญาปิด
 
     elif data.get("msg_type") == "error":
         print("❌ Error:", data["error"]["message"])
