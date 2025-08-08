@@ -2,9 +2,7 @@ import json
 import time
 import numpy as np
 import threading
-import os
 from websocket import WebSocketApp
-from flask import Flask, jsonify
 
 # ============ CONFIG ============
 API_TOKEN = "C82t0gtcRoQv99X"
@@ -27,24 +25,6 @@ wins = 0
 losses = 0
 consecutive_losses = 0
 pause_until = 0
-
-# === Flask API ===
-app = Flask(__name__)
-
-@app.route("/")
-def status():
-    return jsonify({
-        "status": "running",
-        "symbol": symbol,
-        "trades": total_trades,
-        "wins": wins,
-        "losses": losses,
-        "consecutive_losses": consecutive_losses
-    })
-
-@app.route('/favicon.ico')
-def favicon():
-    return '', 204
 
 # --- EMA ---
 def ema(values, period):
@@ -101,12 +81,26 @@ def calculate_macd(prices):
 # --- Sideway Filter ---
 def is_sideway():
     if len(price_history) < 20:
+        print("ℹ️ Not enough data for sideway check (less than 20 prices)")
         return True
-    recent_range = max(price_history[-20:]) - min(price_history[-20:])
-    avg_price = np.mean(price_history[-20:])
+    recent_prices = price_history[-20:]
+    recent_range = max(recent_prices) - min(recent_prices)
+    avg_price = np.mean(recent_prices)
     volatility = recent_range / avg_price
-    print(f"\U0001f6db Sideway Check: Range={recent_range:.5f}, Volatility={volatility:.5f}")
-    return volatility < 0.002
+
+    threshold = 0.002
+    print(f"\U0001f6db Sideway Check:")
+    print(f"   - Price Range (max-min): {recent_range:.6f}")
+    print(f"   - Average Price: {avg_price:.6f}")
+    print(f"   - Volatility (Range/Avg): {volatility:.6f}")
+    print(f"   - Threshold: {threshold}")
+    if volatility < threshold:
+        print(f"   => Market is Sideway because volatility {volatility:.6f} < threshold {threshold}")
+        return True
+    else:
+        print(f"   => Market is NOT Sideway because volatility {volatility:.6f} >= threshold {threshold}")
+        return False
+
 
 # --- Trend Filter ---
 def get_trend_bias():
@@ -241,6 +235,7 @@ def on_message(ws, message):
             profit = contract.get("profit", 0)
             result = "WIN" if profit > 0 else "LOSS"
             update_result(result)
+            active_contract_id = None
 
     elif data.get("msg_type") == "error":
         print("❌ Error:", data["error"]["message"])
@@ -265,8 +260,6 @@ def run_bot():
     )
     ws.run_forever()
 
-# --- Run bot + Flask ---
+# --- Main ---
 if __name__ == '__main__':
-    threading.Thread(target=run_bot).start()
-    port = int(os.environ.get("PORT", 10000))
-    app.run(host='0.0.0.0', port=port)
+    run_bot()
