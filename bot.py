@@ -11,7 +11,7 @@ API_TOKEN = "C82t0gtcRoQv99X"
 amount = 100
 symbol = "R_100"
 duration = 1  # 1 นาที
-required_confidence = 3  # ต้องเจอสัญญาณซ้ำกี่ครั้งก่อนเข้า
+required_confidence = 2  # ลดจาก 3 เป็น 2 เพื่อเข้าเทรดบ่อยขึ้น
 max_price = 100  # ความยาวของประวัติราคา
 max_consecutive_losses = 3
 pause_duration_sec = 300  # หยุด 5 นาทีหลังแพ้ติด
@@ -90,7 +90,8 @@ def calculate_macd(prices):
         sub_prices = prices[-i-26:-i]
         e12 = ema(sub_prices, 12)
         e26 = ema(sub_prices, 26)
-        if e12 and e26:
+        # แก้ไขตรงนี้: เช็คค่า None อย่างถูกต้อง
+        if e12 is not None and e26 is not None:
             macd_history.append(e12 - e26)
     macd_history.append(macd_line)
     if len(macd_history) < 9:
@@ -100,25 +101,15 @@ def calculate_macd(prices):
 
 # --- Sideway Filter ---
 def is_sideway():
-    # 1) ถ้าประวัติราคาน้อยกว่า 20 จุด (tick) ให้ถือว่าตลาด sideway ไปก่อน
     if len(price_history) < 20:
         return True
-
-    # 2) คำนวณช่วงราคาสูงสุด - ต่ำสุด ใน 20 จุดล่าสุด
     recent_range = max(price_history[-20:]) - min(price_history[-20:])
-
-    # 3) หาค่าเฉลี่ยราคาของ 20 จุดล่าสุด
     avg_price = np.mean(price_history[-20:])
-
-    # 4) คำนวณความผันผวน (volatility) = ช่วงราคา / ราคาเฉลี่ย
     volatility = recent_range / avg_price
-
-    # 5) พิมพ์ log เพื่อดูค่าช่วงราคาและความผันผวน
+    # เพิ่ม log volatility
     print(f"🚛 Sideway Check: Range={recent_range:.5f}, Volatility={volatility:.5f}")
-
-    # 6) ถ้าความผันผวน < 0.002 (0.2%) ให้ถือว่าเป็น sideway
-    return volatility < 0.002
-
+    # ปรับ threshold เป็น 0.004 เพื่อให้ฟิลเตอร์ไม่เข้มเกินไป
+    return volatility < 0.004
 
 # --- Trend Filter ---
 def get_trend_bias():
@@ -184,7 +175,7 @@ def update_result(result, profit):
         consecutive_losses += 1
         if consecutive_losses >= max_consecutive_losses:
             pause_until = time.time() + pause_duration_sec
-            print("🛑 Too many losses — Pausing for 5 mins.")
+            print(f"🛑 Too many losses — Pausing for {pause_duration_sec//60} mins.")
 
     win_rate = (wins / total_trades) * 100 if total_trades > 0 else 0
 
@@ -213,7 +204,8 @@ def on_message(ws, message):
 
     elif data.get("msg_type") == "tick":
         if time.time() < pause_until:
-            print("⏸️ Pausing... Waiting to resume")
+            remaining = int(pause_until - time.time())
+            print(f"⏸️ Pausing... Resume in {remaining} seconds")
             return
 
         price = float(data["tick"]["quote"])
@@ -231,6 +223,7 @@ def on_message(ws, message):
                 return
 
             trend = get_trend_bias()
+            # --- ถ้าอยากลองปิดฟิลเตอร์เทรนด์ให้ comment บรรทัดนี้ ---
             if (trend == "UP" and signal == "PUT") or (trend == "DOWN" and signal == "CALL"):
                 print(f"⚠️ Trend Conflict ({trend}) — Skipping.")
                 return
