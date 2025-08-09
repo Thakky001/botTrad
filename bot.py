@@ -83,19 +83,15 @@ def bollinger_bands(prices, period=20):
 
 # --- MACD ---
 def calculate_macd(prices):
-    # ต้องการอย่างน้อย 35 candle ตามเดิม
     if len(prices) < 35:
         return None, None
-    # คำนวณ EMA12 และ EMA26 จากช่วงล่าสุด
     ema12 = ema(prices[-(26+12):], 12) if len(prices) >= 26+12 else ema(prices[-26:], 12)
     ema26 = ema(prices[-26:], 26)
     if ema12 is None or ema26 is None:
         return None, None
     macd_line = ema12 - ema26
 
-    # สร้าง macd history (9 ค่า) เพื่อหา signal line (EMA9 ของ macd_history)
     macd_history = []
-    # สร้างย้อนหลังให้ได้ 9 ค่า (ถ้าเป็นไปได้)
     for offset in range(9, 0, -1):
         start = -offset - 26
         end = -offset
@@ -120,7 +116,6 @@ def is_sideway():
     avg_price = np.mean(window)
     volatility = recent_range / avg_price if avg_price != 0 else 0
     print(f"🚛 Sideway Check: Range={recent_range:.6f}, Volatility={volatility:.6f}")
-    # ปรับ threshold แบบผ่อนกว่าเดิม (ถ้าต้องการให้เข้าบ่อยขึ้น ให้เพิ่ม threshold)
     return volatility < 0.0025
 
 # --- Trend Bias ---
@@ -139,12 +134,6 @@ def get_trend_bias():
 
 # --- Scoring Trade Signal ---
 def get_trade_signal_with_score():
-    """
-    คืนค่า (signal, score, details)
-    signal: "CALL" / "PUT" / None
-    score: คะแนนรวม (float)
-    details: dict ของคะแนนแยกส่วน (เพื่อ debug)
-    """
     if len(price_history) < 35:
         return None, 0.0, {}
 
@@ -168,14 +157,11 @@ def get_trade_signal_with_score():
         "price": current_price
     }
 
-    # ถ้ามาส่วนสำคัญขาด ให้ return None
     if None in (ema_fast, ema_slow, macd_line, signal_line, rsi_value, upper, lower):
         return None, 0.0, details
 
-    # กำหนด score ทีละส่วน (น้ำหนักสามารถปรับได้)
     score = 0.0
 
-    # MACD/Signal: แกนหลัก (weight 1.5)
     if macd_line > signal_line:
         score += 1.5
         macd_dir = "UP"
@@ -184,7 +170,6 @@ def get_trade_signal_with_score():
         macd_dir = "DOWN"
     details["macd_dir"] = macd_dir
 
-    # EMA alignment: weight 1.0
     if ema_fast > ema_slow:
         score += 1.0
         ema_dir = "UP"
@@ -193,29 +178,24 @@ def get_trade_signal_with_score():
         ema_dir = "DOWN"
     details["ema_dir"] = ema_dir
 
-    # RSI: ถ้าอยู่ในช่วงกลาง (30-70) ให้คะแนนบวกเล็กน้อย, ถ้า oversold/overbought ให้ลดคะแนน
     if 30 < rsi_value < 70:
         score += 0.5
     elif rsi_value <= 30:
-        score += 0.2  # oversold แต่ยังเป็นโอกาส CALL
+        score += 0.2
     elif rsi_value >= 70:
-        score += 0.0  # overbought (ไม่เพิ่ม)
+        score += 0.0
     details["rsi_score"] = score
 
-    # Bollinger: ถ้าราคาระหว่าง band แต่ไม่ชิด band มาก ให้คะแนนบวก
     band_width = upper - lower if (upper is not None and lower is not None) else 0
     if band_width > 0:
         dist_to_upper = upper - current_price
         dist_to_lower = current_price - lower
-        # ถ้าอยู่กลาง band (ห่างจาก band มากพอ) ให้คะแนน
         if dist_to_upper > 0.25 * band_width and dist_to_lower > 0.25 * band_width:
             score += 0.4
         else:
-            # ถ้ชิด upper มาก => ลดโอกาส CALL, ถชิด lower => ลดโอกาส PUT
             score += 0.1
     details["band_width"] = band_width
 
-    # Trend bias: ถ้าสอดคล้องกับ macd/ema ให้เพิ่มคะแนนเล็กน้อย
     if trend is not None:
         if (trend == "UP" and macd_dir == "UP" and ema_dir == "UP"):
             score += 0.4
@@ -226,7 +206,6 @@ def get_trade_signal_with_score():
 
     details["score"] = score
 
-    # ตัดสิน CALL / PUT ตามทิศทาง MACD+EMA เป็นหลัก
     if macd_dir == "UP" and ema_dir == "UP":
         signal = "CALL"
     elif macd_dir == "DOWN" and ema_dir == "DOWN":
@@ -310,23 +289,18 @@ def on_message(ws, message):
         now = time.time()
         print(f"📉 Tick: {price}  (history={len(price_history)})")
 
-        # หลีกเลี่ยงเทรดถี่เกินไป
         if now - last_trade_time < min_time_between_trades:
-            # print(f"⏳ Cooldown: {now - last_trade_time:.2f}s since last trade")
             return
 
         signal, score, details = get_trade_signal_with_score()
         print(f"🔎 Signal={signal}, Score={score:.2f}, Details={details}")
 
         if signal:
-            # เพิ่มเงื่อนไข sideway check แบบผ่อน
             if is_sideway():
                 print("⛔ Skip: Sideway Market")
                 return
 
-            # ถ้าคะแนนถึง threshold ให้เข้าเทรด
             if score >= score_threshold and active_contract_id is None:
-                # ใช้ required_confidence เพื่อให้สามารถรอ confirmation ซ้ำ (แต่ default =1)
                 if signal == last_signal:
                     signal_confidence += 1
                 else:
@@ -353,11 +327,15 @@ def on_message(ws, message):
 
     elif data.get("msg_type") == "proposal_open_contract":
         contract = data["proposal_open_contract"]
+        print(f"📝 Proposal open contract data: {json.dumps(contract, indent=2)}")
+        print(f"   is_sold = {contract.get('is_sold')}")
         if contract.get("is_sold"):
             profit = contract.get("profit", 0)
             result = "WIN" if profit > 0 else "LOSS"
             update_result(result, profit)
-            active_contract_id = None  # เคลียร์หลังสัญญาปิด
+            active_contract_id = None
+        else:
+            print("⏳ Contract still active, waiting for close...")
 
     elif data.get("msg_type") == "error":
         print("❌ Error:", data.get("error", {}).get("message"))
