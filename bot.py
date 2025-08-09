@@ -17,6 +17,7 @@ max_price = 200
 max_consecutive_losses = 3
 pause_duration_sec = 300  # หยุด 5 นาทีหลังแพ้ติด
 min_time_between_trades = 5  # วินาที ขั้นต่ำระหว่างการเปิดเทรด  (ช่วยลด noise)
+contract_timeout = 120  # 2 นาที
 # ================================
 
 # สถานะ
@@ -271,6 +272,18 @@ def on_message(ws, message):
     global last_signal, signal_confidence, active_contract_id, last_trade_time
     data = json.loads(message)
 
+    current_time = time.time()
+
+    # เช็ค timeout สัญญาค้าง
+    if active_contract_id is not None:
+        # สมมติว่า last_trade_time คือเวลาที่เปิดสัญญาล่าสุด
+        if current_time - last_trade_time > contract_timeout:
+            print(f"⚠️ Contract timeout reached ({contract_timeout}s), resetting active_contract_id")
+            active_contract_id = None
+            # Reset confidence ด้วยก็ได้
+            signal_confidence = 0
+            last_signal = None
+
     if data.get("msg_type") == "authorize":
         print("✅ Authorized!")
         ws.send(json.dumps({"ticks": symbol}))
@@ -327,15 +340,11 @@ def on_message(ws, message):
 
     elif data.get("msg_type") == "proposal_open_contract":
         contract = data["proposal_open_contract"]
-        print(f"📝 Proposal open contract data: {json.dumps(contract, indent=2)}")
-        print(f"   is_sold = {contract.get('is_sold')}")
         if contract.get("is_sold"):
             profit = contract.get("profit", 0)
             result = "WIN" if profit > 0 else "LOSS"
             update_result(result, profit)
             active_contract_id = None
-        else:
-            print("⏳ Contract still active, waiting for close...")
 
     elif data.get("msg_type") == "error":
         print("❌ Error:", data.get("error", {}).get("message"))
