@@ -1,4 +1,4 @@
-import json
+sudo suspend web service bimport json
 import time
 import numpy as np
 import threading
@@ -445,7 +445,7 @@ def on_message(ws, message):
             logger.info(f"📊 Price: {price:.5f} | History: {len(price_history)} ticks")
 
         # Check minimum time between trades
-        if now - last_trade_time < min_time_between_trades:
+        if current_time - last_trade_time < min_time_between_trades:
             return
 
         # Skip if insufficient data
