@@ -2,7 +2,8 @@ import json
 import time
 import numpy as np
 import threading
-import os
+import logging
+from collections import deque
 from websocket import WebSocketApp
 from flask import Flask, jsonify
 
@@ -10,18 +11,27 @@ from flask import Flask, jsonify
 API_TOKEN = "C82t0gtcRoQv99X"
 amount = 100
 symbol = "R_100"
-duration = 1  # 1 นาที
-required_confidence = 1  # ยังคง 1 (ใช้ score threshold แทน)
-score_threshold = 2.0    # ถ้าคะแนนรวม >= ค่านี้ จะเข้าเทรด
-max_price = 200
+duration = 1  # นาที
+max_price = 150  # ลดจาก 200 เหลือ 150
 max_consecutive_losses = 3
 pause_duration_sec = 300  # หยุด 5 นาทีหลังแพ้ติด
-min_time_between_trades = 5  # วินาที ขั้นต่ำระหว่างการเปิดเทรด  (ช่วยลด noise)
+min_time_between_trades = 5  # วินาที ขั้นต่ำระหว่างเปิดเทรด
 contract_timeout = 120  # 2 นาที
+score_threshold = 3  # ลดจาก 4 เป็น 3
 # ================================
 
-# สถานะ
-price_history = []
+# --- Logger setup ---
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s %(levelname)s: %(message)s',
+    handlers=[logging.FileHandler("bot.log"), logging.StreamHandler()]
+)
+logger = logging.getLogger()
+
+# --- สถานะและล็อก ---
+price_history = deque(maxlen=max_price)
+lock = threading.Lock()  # สำหรับ thread-safe
+
 last_signal = None
 signal_confidence = 0
 active_contract_id = None
@@ -32,189 +42,199 @@ consecutive_losses = 0
 pause_until = 0
 last_trade_time = 0
 
-# === Flask API ===
+# === NEW EMA Calculator Class ===
+class EMACalculator:
+    def __init__(self, period):
+        self.period = period
+        self.multiplier = 2 / (period + 1)
+        self.ema = None
+        self.warmup_data = []
+        
+    def update(self, price):
+        if self.ema is None:
+            self.warmup_data.append(price)
+            if len(self.warmup_data) >= self.period:
+                # ใช้ SMA สำหรับ EMA แรก
+                self.ema = sum(self.warmup_data) / len(self.warmup_data)
+                self.warmup_data = None
+                logger.info(f"EMA {self.period} initialized with SMA: {self.ema:.5f}")
+            return self.ema
+        
+        self.ema = (price * self.multiplier) + (self.ema * (1 - self.multiplier))
+        return self.ema
+    
+    def get_value(self):
+        return self.ema
+    
+    def is_ready(self):
+        return self.ema is not None
+
+# สร้าง EMA calculators
+ema_fast_calc = EMACalculator(5)
+ema_mid_calc = EMACalculator(20)
+ema_slow_calc = EMACalculator(50)
+
+# Flask API
 app = Flask(__name__)
 
 @app.route("/")
 def status():
-    return jsonify({
-        "status": "running",
-        "symbol": symbol,
-        "trades": total_trades,
-        "wins": wins,
-        "losses": losses,
-        "consecutive_losses": consecutive_losses,
-        "last_trade_time": last_trade_time
-    })
+    with lock:
+        status_str = "paused" if time.time() < pause_until else "running"
+        return jsonify({
+            "status": status_str,
+            "symbol": symbol,
+            "trades": total_trades,
+            "wins": wins,
+            "losses": losses,
+            "consecutive_losses": consecutive_losses,
+            "last_trade_time": last_trade_time,
+            "ema_status": {
+                "fast_ready": ema_fast_calc.is_ready(),
+                "mid_ready": ema_mid_calc.is_ready(),
+                "slow_ready": ema_slow_calc.is_ready()
+            }
+        })
 
 @app.route('/favicon.ico')
 def favicon():
     return '', 204
 
-# --- EMA ---
-def ema(values, period):
-    if len(values) < period:
-        return None
-    weights = np.exp(np.linspace(-1., 0., period))
-    weights /= weights.sum()
-    conv = np.convolve(values, weights, mode='valid')
-    return float(conv[-1])
+# --- MACD & Signal Line (improved) ---
+class MACDCalculator:
+    def __init__(self):
+        self.ema12_calc = EMACalculator(12)
+        self.ema26_calc = EMACalculator(26)
+        self.signal_line_calc = EMACalculator(9)
 
-# --- RSI ---
-def rsi(prices, period=14):
-    if len(prices) < period + 1:
-        return None
-    deltas = np.diff(prices[-(period+1):])
-    ups = deltas[deltas > 0].sum() / period
-    downs = -deltas[deltas < 0].sum() / period
-    if downs == 0:
-        return 100.0
-    rs = ups / downs
-    return 100.0 - (100.0 / (1.0 + rs))
+    def update(self, price):
+        ema12 = self.ema12_calc.update(price)
+        ema26 = self.ema26_calc.update(price)
+        
+        if ema12 is None or ema26 is None:
+            return None, None, None
+            
+        macd_line = ema12 - ema26
+        signal_line = self.signal_line_calc.update(macd_line)
+        
+        if signal_line is None:
+            return macd_line, None, None
+            
+        histogram = macd_line - signal_line
+        return macd_line, signal_line, histogram
+    
+    def is_ready(self):
+        return (self.ema12_calc.is_ready() and 
+                self.ema26_calc.is_ready() and 
+                self.signal_line_calc.is_ready())
 
-# --- Bollinger Bands ---
-def bollinger_bands(prices, period=20):
-    if len(prices) < period:
-        return None, None, None
-    sma = np.mean(prices[-period:])
-    std = np.std(prices[-period:])
-    upper = sma + 2 * std
-    lower = sma - 2 * std
-    return float(upper), float(sma), float(lower)
+macd_calculator = MACDCalculator()
 
-# --- MACD ---
-def calculate_macd(prices):
-    if len(prices) < 35:
-        return None, None
-    ema12 = ema(prices[-(26+12):], 12) if len(prices) >= 26+12 else ema(prices[-26:], 12)
-    ema26 = ema(prices[-26:], 26)
-    if ema12 is None or ema26 is None:
-        return None, None
-    macd_line = ema12 - ema26
-
-    macd_history = []
-    for offset in range(9, 0, -1):
-        start = -offset - 26
-        end = -offset
-        if abs(start) <= len(prices):
-            sub = prices[start:end]
-            e12 = ema(sub, 12)
-            e26 = ema(sub, 26)
-            if e12 is not None and e26 is not None:
-                macd_history.append(e12 - e26)
-    macd_history.append(macd_line)
-    if len(macd_history) < 9:
-        return None, None
-    signal_line = ema(macd_history, 9)
-    return float(macd_line), float(signal_line)
-
-# --- Sideway Filter ---
+# --- Improved Sideway Filter ---
 def is_sideway():
-    if len(price_history) < 20:
-        return True
-    window = price_history[-20:]
+    with lock:
+        if len(price_history) < 30:
+            return True
+        window = list(price_history)[-30:]  # เพิ่มจาก 20 เป็น 30
+    
     recent_range = max(window) - min(window)
     avg_price = np.mean(window)
     volatility = recent_range / avg_price if avg_price != 0 else 0
-    print(f"🚛 Sideway Check: Range={recent_range:.6f}, Volatility={volatility:.6f}")
-    return volatility < 0.0025
+    
+    # ปรับ threshold จาก 0.001 เป็น 0.0015
+    return volatility < 0.0015
 
-# --- Trend Bias ---
-def get_trend_bias():
-    if len(price_history) < 60:
-        return None
-    ema_20 = ema(price_history[-60:], 20)
-    ema_50 = ema(price_history[-60:], 50)
-    if ema_20 is None or ema_50 is None:
-        return None
-    if ema_20 > ema_50:
-        return "UP"
-    elif ema_20 < ema_50:
-        return "DOWN"
-    return None
+# --- สัญญาณรวมคะแนน (ปรับปรุง) ---
+def get_signal_score_and_direction():
+    with lock:
+        if len(price_history) < 60:
+            return 0, None  # ข้อมูลไม่พอ
+        
+        current_price = price_history[-1]
 
-# --- Scoring Trade Signal ---
-def get_trade_signal_with_score():
-    if len(price_history) < 35:
-        return None, 0.0, {}
+    # Update EMA calculators
+    ema_fast = ema_fast_calc.update(current_price)
+    ema_mid = ema_mid_calc.update(current_price)
+    ema_slow = ema_slow_calc.update(current_price)
 
-    ema_fast = ema(price_history[-20:], 5)
-    ema_slow = ema(price_history[-20:], 20)
-    macd_line, signal_line = calculate_macd(price_history)
-    rsi_value = rsi(price_history)
-    upper, sma, lower = bollinger_bands(price_history)
-    trend = get_trend_bias()
-    current_price = price_history[-1]
+    macd_line, signal_line, histogram = macd_calculator.update(current_price)
 
-    details = {
-        "ema_fast": ema_fast,
-        "ema_slow": ema_slow,
-        "macd_line": macd_line,
-        "signal_line": signal_line,
-        "rsi": rsi_value,
-        "upper": upper,
-        "lower": lower,
-        "trend": trend,
-        "price": current_price
-    }
+    # ตรวจสอบว่าข้อมูลพร้อมหรือไม่
+    if not all([ema_fast_calc.is_ready(), ema_mid_calc.is_ready(), 
+                ema_slow_calc.is_ready(), macd_calculator.is_ready()]):
+        return 0, None
 
-    if None in (ema_fast, ema_slow, macd_line, signal_line, rsi_value, upper, lower):
-        return None, 0.0, details
+    score = 0
+    signals = []
 
-    score = 0.0
+    # 1. EMA trend alignment
+    if ema_fast > ema_mid:
+        score += 1
+        signals.append("EMA fast > mid (UP)")
+    else:
+        signals.append("EMA fast <= mid (DOWN)")
 
+    # 2. EMA medium trend
+    if ema_mid > ema_slow:
+        score += 1
+        signals.append("EMA mid > slow (UP)")
+    else:
+        signals.append("EMA mid <= slow (DOWN)")
+
+    # 3. MACD line vs Signal line
     if macd_line > signal_line:
-        score += 1.5
-        macd_dir = "UP"
+        score += 1
+        signals.append("MACD line > Signal (UP)")
     else:
-        score -= 1.5
-        macd_dir = "DOWN"
-    details["macd_dir"] = macd_dir
+        signals.append("MACD line <= Signal (DOWN)")
 
-    if ema_fast > ema_slow:
-        score += 1.0
-        ema_dir = "UP"
+    # 4. Histogram momentum
+    if histogram > 0:
+        score += 1
+        signals.append("Histogram > 0 (UP)")
     else:
-        score -= 1.0
-        ema_dir = "DOWN"
-    details["ema_dir"] = ema_dir
+        signals.append("Histogram <= 0 (DOWN)")
 
-    if 30 < rsi_value < 70:
-        score += 0.5
-    elif rsi_value <= 30:
-        score += 0.2
-    elif rsi_value >= 70:
-        score += 0.0
-    details["rsi_score"] = score
-
-    band_width = upper - lower if (upper is not None and lower is not None) else 0
-    if band_width > 0:
-        dist_to_upper = upper - current_price
-        dist_to_lower = current_price - lower
-        if dist_to_upper > 0.25 * band_width and dist_to_lower > 0.25 * band_width:
-            score += 0.4
-        else:
-            score += 0.1
-    details["band_width"] = band_width
-
-    if trend is not None:
-        if (trend == "UP" and macd_dir == "UP" and ema_dir == "UP"):
-            score += 0.4
-        elif (trend == "DOWN" and macd_dir == "DOWN" and ema_dir == "DOWN"):
-            score += 0.4
-        else:
-            score -= 0.2
-
-    details["score"] = score
-
-    if macd_dir == "UP" and ema_dir == "UP":
-        signal = "CALL"
-    elif macd_dir == "DOWN" and ema_dir == "DOWN":
-        signal = "PUT"
+    # 5. Market condition (not sideway)
+    if not is_sideway():
+        score += 1
+        signals.append("Not sideway")
     else:
-        signal = None
+        signals.append("Sideway detected")
 
-    return signal, float(score), details
+    # นับสัญญาณ bullish/bearish
+    bullish_count = sum(1 for s in signals[:4] if "(UP)" in s)
+    bearish_count = 4 - bullish_count
+
+    # กำหนด direction
+    if bullish_count >= 3 and score >= score_threshold:
+        direction = "CALL"
+    elif bearish_count >= 3 and score >= score_threshold:
+        direction = "PUT"
+    else:
+        direction = None
+
+    # Log สำหรับ debug
+    logger.debug(f"EMA: Fast={ema_fast:.5f}, Mid={ema_mid:.5f}, Slow={ema_slow:.5f}")
+    logger.debug(f"MACD: Line={macd_line:.5f}, Signal={signal_line:.5f}, Hist={histogram:.5f}")
+    logger.debug(f"Signals: {signals}")
+    logger.debug(f"Score: {score}/{len(signals)}, Direction: {direction}")
+    
+    return score, direction
+
+# --- Filter tick outlier (ปรับปรุง) ---
+def is_valid_tick(new_price):
+    with lock:
+        if not price_history:
+            return True
+        last_price = price_history[-1]
+    
+    change = abs(new_price - last_price) / last_price
+    # ปรับจาก 10% เป็น 5% เพื่อกรองได้ดีขึ้น
+    if change > 0.05:
+        logger.warning(f"Outlier detected: price jump {change*100:.2f}% from {last_price} to {new_price}")
+        return False
+    return True
 
 # --- ส่งคำสั่งเทรด ---
 def send_trade(ws, contract_type):
@@ -234,105 +254,107 @@ def send_trade(ws, contract_type):
     }
     ws.send(json.dumps(trade))
     last_trade_time = time.time()
-    print("🚀 Trade sent:", contract_type, "at", time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(last_trade_time)))
+    logger.info(f"🚀 Trade sent: {contract_type} at {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(last_trade_time))}")
 
 # --- อัปเดตผล ---
 def update_result(result, profit):
     global total_trades, wins, losses, consecutive_losses, pause_until
-    total_trades += 1
+    with lock:
+        total_trades += 1
 
-    if result == "WIN":
-        wins += 1
-        consecutive_losses = 0
-    else:
-        losses += 1
-        consecutive_losses += 1
-        if consecutive_losses >= max_consecutive_losses:
-            pause_until = time.time() + pause_duration_sec
-            print(f"🛑 Too many losses — Pausing for {pause_duration_sec//60} mins.")
+        if result == "WIN":
+            wins += 1
+            consecutive_losses = 0
+        else:
+            losses += 1
+            consecutive_losses += 1
+            if consecutive_losses >= max_consecutive_losses:
+                pause_until = time.time() + pause_duration_sec
+                logger.warning(f"🛑 Too many losses — Pausing for {pause_duration_sec//60} mins.")
 
-    win_rate = (wins / total_trades) * 100 if total_trades > 0 else 0
+        win_rate = (wins / total_trades) * 100 if total_trades > 0 else 0
 
-    print("\n===== 📊 SUMMARY AFTER TRADE =====")
-    print(f"📌 Result         : {result}")
-    print(f"💰 Profit/Loss   : {profit:.2f} USD")
-    print(f"🧮 Total Trades  : {total_trades}")
-    print(f"✅ Wins          : {wins}")
-    print(f"❌ Losses        : {losses}")
-    print(f"📈 Win Rate      : {win_rate:.2f}%")
-    print(f"⚠️ Consecutive L : {consecutive_losses}")
-    print("=================================\n")
+    logger.info("\n===== 📊 SUMMARY AFTER TRADE =====")
+    logger.info(f"📌 Result         : {result}")
+    logger.info(f"💰 Profit/Loss   : {profit:.2f} USD")
+    logger.info(f"🧮 Total Trades  : {total_trades}")
+    logger.info(f"✅ Wins          : {wins}")
+    logger.info(f"❌ Losses        : {losses}")
+    logger.info(f"📈 Win Rate      : {win_rate:.2f}%")
+    logger.info(f"⚠️ Consecutive L : {consecutive_losses}")
+    logger.info("=================================\n")
 
 # --- WebSocket Events ---
 def on_open(ws):
-    print("✅ Connected!")
+    logger.info("✅ Connected!")
     ws.send(json.dumps({"authorize": API_TOKEN}))
 
 def on_message(ws, message):
     global last_signal, signal_confidence, active_contract_id, last_trade_time
-    data = json.loads(message)
 
+    data = json.loads(message)
     current_time = time.time()
 
-    # เช็ค timeout สัญญาค้าง
+    # ตรวจสอบ contract timeout
     if active_contract_id is not None:
-        # สมมติว่า last_trade_time คือเวลาที่เปิดสัญญาล่าสุด
         if current_time - last_trade_time > contract_timeout:
-            print(f"⚠️ Contract timeout reached ({contract_timeout}s), resetting active_contract_id")
+            logger.warning(f"⚠️ Contract timeout reached ({contract_timeout}s), resetting active_contract_id")
             active_contract_id = None
-            # Reset confidence ด้วยก็ได้
             signal_confidence = 0
             last_signal = None
 
     if data.get("msg_type") == "authorize":
-        print("✅ Authorized!")
+        logger.info("✅ Authorized!")
         ws.send(json.dumps({"ticks": symbol}))
 
     elif data.get("msg_type") == "tick":
+        # ตรวจสอบ pause status
         if time.time() < pause_until:
             remaining = int(pause_until - time.time())
-            print(f"⏸️ Pausing... Resume in {remaining} seconds")
+            if remaining % 60 == 0:  # log ทุกนาที
+                logger.info(f"⏸️ Pausing... Resume in {remaining} seconds")
             return
 
         price = float(data["tick"]["quote"])
-        price_history.append(price)
-        if len(price_history) > max_price:
-            price_history.pop(0)
 
+        # กรอง outlier ticks
+        if not is_valid_tick(price):
+            return
+
+        with lock:
+            price_history.append(price)
+
+        # ตรวจสอบเวลาระหว่างเทรด
         now = time.time()
-        print(f"📉 Tick: {price}  (history={len(price_history)})")
-
         if now - last_trade_time < min_time_between_trades:
             return
 
-        signal, score, details = get_trade_signal_with_score()
-        print(f"🔎 Signal={signal}, Score={score:.2f}, Details={details}")
+        # คำนวณสัญญาณ
+        score, signal = get_signal_score_and_direction()
 
-        if signal:
-            if is_sideway():
-                print("⛔ Skip: Sideway Market")
-                return
-
-            if score >= score_threshold and active_contract_id is None:
-                if signal == last_signal:
-                    signal_confidence += 1
-                else:
-                    signal_confidence = 1
-                    last_signal = signal
-
-                if signal_confidence >= required_confidence:
-                    send_trade(ws, signal)
-                    signal_confidence = 0
+        # ตัดสินใจเทรด
+        if signal and score >= score_threshold and active_contract_id is None:
+            if signal == last_signal:
+                signal_confidence += 1
             else:
-                print(f"ℹ️ Score below threshold ({score:.2f} < {score_threshold}) — Not trading")
+                signal_confidence = 1
+                last_signal = signal
+
+            # เทรดทันทีเมื่อได้สัญญาณ (confidence >= 1)
+            if signal_confidence >= 1:
+                logger.info(f"📊 Signal: {signal}, Score: {score}, Confidence: {signal_confidence}")
+                send_trade(ws, signal)
+                signal_confidence = 0
         else:
-            signal_confidence = 0
-            last_signal = None
+            # reset signal ถ้าไม่ได้เงื่อนไข
+            if signal != last_signal:
+                signal_confidence = 0
+                last_signal = None
 
     elif data.get("msg_type") == "buy":
         contract_id = data["buy"]["contract_id"]
         active_contract_id = contract_id
-        print("📈 Buy Confirmed:", json.dumps(data, indent=2))
+        logger.info(f"📈 Buy Confirmed - Contract ID: {contract_id}")
         ws.send(json.dumps({
             "proposal_open_contract": 1,
             "contract_id": contract_id
@@ -347,18 +369,24 @@ def on_message(ws, message):
             active_contract_id = None
 
     elif data.get("msg_type") == "error":
-        print("❌ Error:", data.get("error", {}).get("message"))
+        logger.error(f"❌ Error: {data.get('error', {}).get('message')}")
+        # Reset active contract on error
+        if active_contract_id:
+            active_contract_id = None
 
 def on_error(ws, error):
-    print("❌ Error:", error)
+    logger.error(f"❌ WebSocket Error: {error}")
 
 def on_close(ws, code, reason):
-    print(f"🔌 Disconnected: {code} | {reason}")
-    print("🔁 Reconnecting in 10 sec...")
-    time.sleep(10)
-    run_bot()
+    logger.warning(f"🔌 Disconnected: Code={code}, Reason={reason}")
+    logger.info("🔁 Reconnecting in 10 seconds...")
 
-# --- Start ---
+    def reconnect():
+        run_bot()
+    timer = threading.Timer(10, reconnect)
+    timer.start()
+
+# --- Start Bot ---
 def run_bot():
     ws = WebSocketApp(
         "wss://ws.derivws.com/websockets/v3?app_id=1089",
@@ -371,6 +399,7 @@ def run_bot():
 
 # --- Run bot + Flask ---
 if __name__ == '__main__':
-    threading.Thread(target=run_bot).start()
-    port = int(os.environ.get("PORT", 10000))
+    logger.info("🤖 Starting Trading Bot with Improved EMA Calculation...")
+    threading.Thread(target=run_bot, daemon=True).start()
+    port = 10000
     app.run(host='0.0.0.0', port=port)
