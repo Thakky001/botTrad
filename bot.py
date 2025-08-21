@@ -1,16 +1,23 @@
 # -*- coding: utf-8 -*-
 """
-Deriv V100 Trading Bot — Adaptive & Confirmed Entry Version
-- Candle-based indicators (1m)
-- Multi-bar confirmation + ATR sideway filter (adaptive)
-- Linear regression slope for EMA(mid)
-- Volume proxy (tick frequency) guard
-- Reversal trap during WATCH window
-- Proposal -> double-check -> Buy flow
-- Subscribed contract status; clear immediately on settle
-- Risk controls (daily caps, hourly caps, cooldowns)
+Deriv V100 Trading Bot — Adaptive & Confirmed Entry (Tuned)
+- Candle(1m), multi-bar confirm → WATCH window
+- Adaptive thresholds (ATR/avg) + EMA(mid) regression slope
+- MACD histogram continuity check
+- Tick-frequency liquidity guard
+- Reversal trap during WATCH
+- Proposal → double-check → Buy
+- Subscribed contract; clear on settle
+- Risk controls (caps, cooldowns)
 - Exponential backoff reconnect
 - Flask status endpoint
+
+Tuning in this build to actually take trades:
+- Start after ~30 bars instead of 60
+- WATCH window 15s
+- Liquidity threshold slightly relaxed
+- Adaptive thresholds (gap/slope) slightly relaxed
+- Early "sideway" guard no longer blocks when data is insufficient; quality filter handles it
 """
 
 import os
@@ -45,13 +52,13 @@ CONFIRM_BARS = 2            # ต้องได้ทิศเดียวก�
 
 # ==== Adaptive thresholds & robustness ====
 SLOPE_WINDOW = 7            # ใช้ค่า 5–7 แท่งได้ (เลือก 7 ให้เนียน)
-K_EMA_GAP    = 1.0          # MIN_EMA_GAP = K_EMA_GAP * (ATR/avg_close)
-K_EMA_SLOPE  = 0.8          # MIN_EMA_SLOPE = K_EMA_SLOPE * (ATR/avg_close)
-K_ATR_RATIO  = 0.8          # ATR_RATIO_TH = K_ATR_RATIO * (std/avg_close)
+K_EMA_GAP    = 0.7          # เดิม 1.0 → ผ่อนเล็กน้อย
+K_EMA_SLOPE  = 0.6          # เดิม 0.8 → ผ่อนเล็กน้อย
+K_ATR_RATIO  = 0.8          # ใช้กำหนดเกณฑ์ sideway แบบ adaptive
 
 # ==== Volume proxy / liquidity ====
 TICK_FREQ_WIN_SEC = 20      # วินโดว์วัดความถี่ tick
-MIN_TICKS_PER_WIN = 12      # ขั้นต่ำจำนวน tick ภายใน 20s (≈ ≥0.6 tick/sec)
+MIN_TICKS_PER_WIN = 9       # เดิม 12 → 9 (≈ ≥0.45 tick/sec)
 
 # Reversal trap
 REVERSAL_HIST_MIN = 0.0     # ขั้นต่ำขนาด histogram เพื่อถือว่าพลิก (0 = ทุกการข้ามศูนย์)
@@ -60,7 +67,7 @@ REVERSAL_HIST_MIN = 0.0     # ขั้นต่ำขนาด histogram เพ
 ATR_PERIOD = 14
 
 # หน้าต่างรอเช็คซ้ำตอนเปิดแท่งใหม่ (WATCH / PRECHECK)
-WATCH_WINDOW_SEC = 8
+WATCH_WINDOW_SEC = 15       # เดิม 8 → 15
 
 # ข้อเสนอ-อัตราจ่ายขั้นต่ำ
 MIN_PAYOUT = 1.75           # payout/ask_price อย่างน้อยเท่านี้
@@ -82,8 +89,11 @@ CANDLES_MAX = 600
 # Timeout: ผูกกับ duration
 CONTRACT_TIMEOUT_SEC = DURATION_MIN * 60 + 30
 
-# Token
-API_TOKEN = "C82t0gtcRoQv99X"
+# เริ่มทำงานหลังมีข้อมูลพอ
+MIN_READY_BARS = 30         # เดิม 60 → 30 (อินดี้ชุดนี้พอแล้ว)
+
+# Token (ใช้ env ก่อน ถ้าไม่มีก็ fallback)
+API_TOKEN = os.getenv("DERIV_TOKEN", "C82t0gtcRoQv99X")
 
 # ================== LOGGING SETUP ==================
 logging.basicConfig(
@@ -252,7 +262,7 @@ def get_dynamic_thresholds():
     - ATR_RATIO_TH   = K_ATR_RATIO * (std_ratio)
     """
     cl = list(candles)
-    if len(cl) < max(ATR_PERIOD + 1, 20):
+    if len(cl) < max(ATR_PERIOD + 1, 20) or len(price_history) < 30:
         return None, None, None
 
     atr = compute_atr(cl, ATR_PERIOD)
@@ -270,22 +280,19 @@ def get_dynamic_thresholds():
 
 def is_sideway_atr():
     """
-    เดิม: ATR/avg_close < ค่าคงที่
-    ใหม่: ใช้เกณฑ์ ATR_RATIO_TH แบบ adaptive จาก std_ratio
+    เดิม: ถ้าข้อมูลไม่ครบ → ถือว่า sideway (True) แล้วตัดสิทธิ์
+    ใหม่: ถ้าข้อมูลยังไม่ครบ → ไม่ตัดสิทธิ์ (False) ให้ strong_trend_ok เป็นด่านหลัก
     """
     cl = list(candles)
     atr = compute_atr(cl, ATR_PERIOD)
-    if atr is None or len(cl) == 0:
-        return True
+    if atr is None or len(cl) < 20:
+        return False  # ไม่ตัดสิทธิ์ช่วงต้น
 
-    last20 = [c["close"] for c in cl[-20:]] if len(cl) >= 20 else [cl[-1]["close"]]
-    avg_close = np.mean(last20)
-
+    last20 = [c["close"] for c in cl[-20:]]
+    avg_close = np.mean(last20) if last20 else 0
     min_gap, min_slope, atr_ratio_th = get_dynamic_thresholds()
     if atr_ratio_th is None or avg_close == 0:
-        # ถ้าเพิ่งเริ่ม ให้เข้มไว้ก่อน (ถือว่า sideway เพื่อลด false trade)
-        return True
-
+        return False  # ไม่ตัดสิทธิ์ถ้ายังคำนวณไม่ครบ
     return (atr / avg_close) < atr_ratio_th
 
 def is_low_liquidity():
@@ -360,40 +367,60 @@ def get_signal_score_and_direction(close_price):
 
 def strong_trend_ok(avg_price, ema_mid, ema_slow, hist_series, bullish):
     """
-    เวอร์ชันใหม่:
+    เวอร์ชันใหม่ (มีเหตุผล debug):
     - ใช้ threshold แบบ adaptive (ATR/avg_close)
     - สโลป EMA(mid) จาก linear regression บน mid_series ช่วงท้าย
     - MACD histogram ต้องต่อเนื่องตามทิศ
     """
+    reasons = []
     if avg_price is None or ema_mid is None or ema_slow is None:
+        reasons.append("avg/ema None")
+        logger.info("quality_fail: " + ", ".join(reasons))
         return False
 
     min_gap, min_slope, _atr_ratio_th = get_dynamic_thresholds()
     if min_gap is None or min_slope is None:
+        reasons.append("adaptive thresholds not ready")
+        logger.info("quality_fail: " + ", ".join(reasons))
         return False
 
     gap = abs(ema_mid - ema_slow) / avg_price
     if gap < min_gap:
-        return False
+        reasons.append(f"gap {gap:.5f} < {min_gap:.5f}")
 
     slope_raw = regression_slope(mid_series, window=SLOPE_WINDOW)
     if slope_raw is None:
-        return False
-    # normalize slope ด้วย avg_price
-    slope_norm = abs(slope_raw) / avg_price
-    if slope_norm < min_slope:
-        return False
+        reasons.append("slope_raw None")
+    else:
+        slope_norm = abs(slope_raw) / avg_price
+        if slope_norm < min_slope:
+            reasons.append(f"slope {slope_norm:.5f} < {min_slope:.5f}")
 
     if len(hist_series) < 2:
-        return False
-    if bullish:
-        if not all(h > 0 for h in hist_series[-2:]):
-            return False
+        reasons.append("hist_len < 2")
     else:
-        if not all(h < 0 for h in hist_series[-2:]):
-            return False
+        if bullish:
+            if not all(h > 0 for h in hist_series[-2:]):
+                reasons.append("hist not consecutively positive")
+        else:
+            if not all(h < 0 for h in hist_series[-2:]):
+                reasons.append("hist not consecutively negative")
 
+    if reasons:
+        logger.info("quality_fail: " + ", ".join(reasons))
+        return False
     return True
+
+# =================== MARKET READY ==================
+def market_ready():
+    """
+    เงื่อนไขขั้นต่ำให้ระบบเริ่มพิจารณาเทรด
+    """
+    return (
+        ema_slow_calc.ready() and macd_calc.ready()
+        and len(candles) >= 30
+        and len(price_history) >= MIN_READY_BARS
+    )
 
 # ============== PROPOSAL & BUY FLOW ===============
 def request_ticks(ws):
@@ -494,14 +521,19 @@ def process_closed_candle(ws, closed_candle):
             watch_until = closed_candle["t0"] + CANDLE_SECONDS + WATCH_WINDOW_SEC
             # บันทึกเครื่องหมาย histogram ตอนเริ่ม WATCH
             watch_hist_sign = 1 if (hist is not None and hist > 0) else (-1 if (hist is not None and hist < 0) else 0)
-            logger.info(f"👀 WATCH: {pending_dir} (confirmed {CONFIRM_BARS} bars), until {int(watch_until - time.time())}s")
+            mg, ms, atr_th = get_dynamic_thresholds()
+            logger.info(
+                f"👀 WATCH: {pending_dir} (confirmed {CONFIRM_BARS} bars), "
+                f"until ~{int(max(0, watch_until - time.time()))}s | "
+                f"thr[min_gap={mg}, min_slope={ms}, atr_th={atr_th}]"
+            )
     else:
         recent_dirs.clear()
 
 def maybe_precheck_and_request(ws):
     """
     เรียกทุก tick ระหว่างอยู่ในช่วง WATCH:
-    - เช็ค risk caps/active/liquidity
+    - เช็ค market_ready + risk caps/active/liquidity
     - เช็คคุณภาพเทรนด์ (gap/slope/hist streak) + ATR ผ่าน
     - Reversal trap: histogram พลิกระหว่าง WATCH -> ยกเลิก
     - ผ่านทั้งหมด -> ขอ proposal ทันที
@@ -513,6 +545,9 @@ def maybe_precheck_and_request(ws):
     now = time.time()
     if now > watch_until:
         pending_dir = None
+        return
+
+    if not market_ready():
         return
 
     ok, reason = base_can_trade_now()
@@ -531,9 +566,7 @@ def maybe_precheck_and_request(ws):
             return
 
     with lock:
-        if len(price_history) < 60:
-            return
-        avg_price = np.mean(list(price_history)[-20:])
+        avg_price = np.mean(list(price_history)[-20:]) if len(price_history) >= 20 else None
         ema_mid = ema_mid_calc.value()
         ema_slow = ema_slow_calc.value()
         atr_ok = not is_sideway_atr()
@@ -542,6 +575,8 @@ def maybe_precheck_and_request(ws):
     if strong_trend_ok(avg_price, ema_mid, ema_slow, list(hist_buffer), bullish) and atr_ok:
         request_proposal(ws, pending_dir)
         pending_dir = None
+    else:
+        logger.info("⏸️ Precheck quality not met; waiting...")
 
 # ================== TRADE LOGGING ==================
 TRADE_LOG_FILE = "trades.csv"
@@ -622,6 +657,10 @@ def on_message(ws, message):
         rr = (payout / ask_price) if ask_price else 0.0
         ctype = quote.get("contract_type")
 
+        if not market_ready():
+            logger.info("❎ Skip proposal: market not ready")
+            return
+
         ok, reason = base_can_trade_now()
         if not ok:
             logger.info(f"❎ Skip proposal (risk): {reason}")
@@ -629,9 +668,7 @@ def on_message(ws, message):
 
         # Double-check ตลาด ณ เวลานี้ (ใช้ค่าล่าสุดของอินดี้จากแท่งปิด)
         with lock:
-            if len(price_history) < 60:
-                return
-            avg_price = np.mean(list(price_history)[-20:])
+            avg_price = np.mean(list(price_history)[-20:]) if len(price_history) >= 20 else None
             ema_mid = ema_mid_calc.value()
             ema_slow = ema_slow_calc.value()
             atr_ok = not is_sideway_atr()
@@ -738,6 +775,6 @@ def favicon():
 
 # ===================== MAIN ========================
 if __name__ == "__main__":
-    logger.info("🤖 Starting Deriv Trading Bot (adaptive confirmed-entry)...")
+    logger.info("🤖 Starting Deriv Trading Bot (adaptive confirmed-entry, tuned)…")
     threading.Thread(target=run_bot, daemon=True).start()
     app.run(host="0.0.0.0", port=10000)
