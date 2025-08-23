@@ -1,10 +1,10 @@
 # -*- coding: utf-8 -*-
 """
-Deriv V100 Trading Bot — Adaptive & Confirmed Entry (Tuned)
+Deriv V100 Trading Bot — Adaptive & Confirmed Entry (Tuned, More Eager)
 - Candle(1m), multi-bar confirm → WATCH window
 - Adaptive thresholds (ATR/avg) + EMA(mid) regression slope
-- MACD histogram continuity check
-- Tick-frequency liquidity guard
+- MACD histogram continuity check (relaxed to 1 bar)
+- Tick-frequency liquidity guard (relaxed)
 - Reversal trap during WATCH
 - Proposal → double-check → Buy
 - Subscribed contract; clear on settle
@@ -13,11 +13,11 @@ Deriv V100 Trading Bot — Adaptive & Confirmed Entry (Tuned)
 - Flask status endpoint
 
 Tuning in this build to actually take trades:
-- Start after ~30 bars instead of 60
-- WATCH window 15s
-- Liquidity threshold slightly relaxed
-- Adaptive thresholds (gap/slope) slightly relaxed
-- Early "sideway" guard no longer blocks when data is insufficient; quality filter handles it
+- Start after ~30 bars
+- WATCH window 20s (from 15s)
+- Liquidity threshold relaxed (ticks win 30s / min 6)
+- Adaptive thresholds slope/sideway relaxed
+- SCORE_THRESHOLD 2 (from 3) → more WATCH entries
 """
 
 import os
@@ -42,35 +42,36 @@ APP_ID = 1089               # Deriv demo app id
 EMA_FAST_P = 5
 EMA_MID_P  = 20
 EMA_SLOW_P = 50
-SCORE_THRESHOLD = 3
+SCORE_THRESHOLD = 2         # (เดิม 3) ให้เข้าสู่ WATCH ง่ายขึ้น
 
 # การรวมแท่ง
 CANDLE_SECONDS = 60
 
 # การยืนยันสัญญาณ
 CONFIRM_BARS = 2            # ต้องได้ทิศเดียวกันติดกันกี่แท่ง (จากแท่งที่ปิดแล้ว)
+HIST_CONSEC_BARS = 1        # (ใหม่) ต้องให้ MACD hist ตรงทิศกี่แท่งล่าสุด
 
 # ==== Adaptive thresholds & robustness ====
 SLOPE_WINDOW = 7            # ใช้ค่า 5–7 แท่งได้ (เลือก 7 ให้เนียน)
-K_EMA_GAP    = 0.7          # เดิม 1.0 → ผ่อนเล็กน้อย
-K_EMA_SLOPE  = 0.6          # เดิม 0.8 → ผ่อนเล็กน้อย
-K_ATR_RATIO  = 0.8          # ใช้กำหนดเกณฑ์ sideway แบบ adaptive
+K_EMA_GAP    = 0.7          # คงเดิม
+K_EMA_SLOPE  = 0.45         # (เดิม 0.6) ผ่อนเล็กน้อย
+K_ATR_RATIO  = 0.6          # (เดิม 0.8) ลดโอกาสโดนตีว่า sideway ง่ายเกิน
 
 # ==== Volume proxy / liquidity ====
-TICK_FREQ_WIN_SEC = 20      # วินโดว์วัดความถี่ tick
-MIN_TICKS_PER_WIN = 9       # เดิม 12 → 9 (≈ ≥0.45 tick/sec)
+TICK_FREQ_WIN_SEC = 30      # (เดิม 20) ยืดหน้าต่างนับ tick
+MIN_TICKS_PER_WIN = 6       # (เดิม 9) ให้ผ่านง่ายขึ้น (~0.2 tick/sec)
 
 # Reversal trap
-REVERSAL_HIST_MIN = 0.0     # ขั้นต่ำขนาด histogram เพื่อถือว่าพลิก (0 = ทุกการข้ามศูนย์)
+REVERSAL_HIST_MIN = 0.0     # 0 = flip เบา ๆ ก็ตัด; ถ้าอยากมองข้าม flip เล็ก ๆ ลองตั้ง 0.002
 
 # เกณฑ์ sideway ดั้งเดิม (ถูกแทนด้วย adaptive ภายในฟังก์ชัน)
 ATR_PERIOD = 14
 
 # หน้าต่างรอเช็คซ้ำตอนเปิดแท่งใหม่ (WATCH / PRECHECK)
-WATCH_WINDOW_SEC = 15       # เดิม 8 → 15
+WATCH_WINDOW_SEC = 20       # (เดิม 15)
 
 # ข้อเสนอ-อัตราจ่ายขั้นต่ำ
-MIN_PAYOUT = 1.75           # payout/ask_price อย่างน้อยเท่านี้
+MIN_PAYOUT = 1.75           # ถ้าทดสอบ flow ให้ชัวร์ ลองปรับเป็น 1.70 ชั่วคราวได้
 
 # Risk management
 MAX_TRADES_PER_HOUR = 12
@@ -90,7 +91,7 @@ CANDLES_MAX = 600
 CONTRACT_TIMEOUT_SEC = DURATION_MIN * 60 + 30
 
 # เริ่มทำงานหลังมีข้อมูลพอ
-MIN_READY_BARS = 30         # เดิม 60 → 30 (อินดี้ชุดนี้พอแล้ว)
+MIN_READY_BARS = 30
 
 # Token (ใช้ env ก่อน ถ้าไม่มีก็ fallback)
 API_TOKEN = os.getenv("DERIV_TOKEN", "C82t0gtcRoQv99X")
@@ -302,7 +303,11 @@ def is_low_liquidity():
     now = time.time()
     while tick_times and now - tick_times[0] > TICK_FREQ_WIN_SEC:
         tick_times.popleft()
-    return len(tick_times) < MIN_TICKS_PER_WIN
+    cnt = len(tick_times)
+    if cnt < MIN_TICKS_PER_WIN:
+        logger.info(f"liquidity_dbg: ticks_in_{TICK_FREQ_WIN_SEC}s={cnt} < {MIN_TICKS_PER_WIN}")
+        return True
+    return False
 
 # =============== REGRESSION SLOPE ==================
 def regression_slope(series, window=SLOPE_WINDOW):
@@ -370,7 +375,7 @@ def strong_trend_ok(avg_price, ema_mid, ema_slow, hist_series, bullish):
     เวอร์ชันใหม่ (มีเหตุผล debug):
     - ใช้ threshold แบบ adaptive (ATR/avg_close)
     - สโลป EMA(mid) จาก linear regression บน mid_series ช่วงท้าย
-    - MACD histogram ต้องต่อเนื่องตามทิศ
+    - MACD histogram ต้องต่อเนื่องตามทิศ (ผ่อนเหลือ 1 แท่งล่าสุด)
     """
     reasons = []
     if avg_price is None or ema_mid is None or ema_slow is None:
@@ -396,15 +401,17 @@ def strong_trend_ok(avg_price, ema_mid, ema_slow, hist_series, bullish):
         if slope_norm < min_slope:
             reasons.append(f"slope {slope_norm:.5f} < {min_slope:.5f}")
 
-    if len(hist_series) < 2:
-        reasons.append("hist_len < 2")
+    # ผ่อน histogram ต่อเนื่องเหลือ 1 แท่งล่าสุด
+    if len(hist_series) < HIST_CONSEC_BARS:
+        reasons.append(f"hist_len < {HIST_CONSEC_BARS}")
     else:
+        last_slice = hist_series[-HIST_CONSEC_BARS:]
         if bullish:
-            if not all(h > 0 for h in hist_series[-2:]):
-                reasons.append("hist not consecutively positive")
+            if not all(h > 0 for h in last_slice):
+                reasons.append("hist not positive")
         else:
-            if not all(h < 0 for h in hist_series[-2:]):
-                reasons.append("hist not consecutively negative")
+            if not all(h < 0 for h in last_slice):
+                reasons.append("hist not negative")
 
     if reasons:
         logger.info("quality_fail: " + ", ".join(reasons))
@@ -560,7 +567,10 @@ def maybe_precheck_and_request(ws):
     if hist_buffer:
         latest_hist = hist_buffer[-1]
         latest_sign = 1 if latest_hist > 0 else (-1 if latest_hist < 0 else 0)
-        if watch_hist_sign != 0 and latest_sign != 0 and latest_sign != watch_hist_sign and abs(latest_hist) >= REVERSAL_HIST_MIN:
+        if (
+            watch_hist_sign != 0 and latest_sign != 0 and latest_sign != watch_hist_sign
+            and abs(latest_hist) >= REVERSAL_HIST_MIN
+        ):
             logger.info("🚫 Reversal trap: histogram flipped during WATCH — cancel signal")
             pending_dir = None
             return
@@ -676,6 +686,8 @@ def on_message(ws, message):
         bullish = (ctype == "CALL")
         strong_ok = strong_trend_ok(avg_price, ema_mid, ema_slow, list(hist_buffer), bullish) and atr_ok
 
+        logger.info(f"proposal_dbg: payout={payout:.2f} ask={ask_price:.2f} rr={rr:.3f} need>={MIN_PAYOUT} strong_ok={strong_ok}")
+
         if rr >= MIN_PAYOUT and strong_ok:
             buy_from_proposal(ws, quote["id"])
         else:
@@ -775,6 +787,8 @@ def favicon():
 
 # ===================== MAIN ========================
 if __name__ == "__main__":
+    if not API_TOKEN or API_TOKEN == "C82t0gtcRoQv99X":
+        logger.warning("⚠️ Please set DERIV_TOKEN env var or put your API token in API_TOKEN.")
     logger.info("🤖 Starting Deriv Trading Bot (adaptive confirmed-entry, tuned)…")
     threading.Thread(target=run_bot, daemon=True).start()
     app.run(host="0.0.0.0", port=10000)
