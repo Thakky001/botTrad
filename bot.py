@@ -34,66 +34,57 @@ from flask import Flask, jsonify
 
 # ===================== CONFIG =====================
 SYMBOL = "R_100"
-DURATION_MIN = 1            # ระยะสัญญา (นาที)
-AMOUNT = 100                # เงินต่อไม้ (stake)
-APP_ID = 1089               # Deriv demo app id
+DURATION_MIN = 1
+AMOUNT = 100
+APP_ID = 1089
 
-# อินดิเคเตอร์หลัก
+
 EMA_FAST_P = 5
-EMA_MID_P  = 20
+EMA_MID_P = 20
 EMA_SLOW_P = 50
-SCORE_THRESHOLD = 2         # (เดิม 3) ให้เข้าสู่ WATCH ง่ายขึ้น
+SCORE_THRESHOLD = 2
 
-# การรวมแท่ง
+
 CANDLE_SECONDS = 60
+CONFIRM_BARS = 2
+HIST_CONSEC_BARS = 1
 
-# การยืนยันสัญญาณ
-CONFIRM_BARS = 2            # ต้องได้ทิศเดียวกันติดกันกี่แท่ง (จากแท่งที่ปิดแล้ว)
-HIST_CONSEC_BARS = 1        # (ใหม่) ต้องให้ MACD hist ตรงทิศกี่แท่งล่าสุด
 
 # ==== Adaptive thresholds & robustness ====
-SLOPE_WINDOW = 7            # ใช้ค่า 5–7 แท่งได้ (เลือก 7 ให้เนียน)
-K_EMA_GAP    = 0.7          # คงเดิม
-K_EMA_SLOPE  = 0.45         # (เดิม 0.6) ผ่อนเล็กน้อย
-K_ATR_RATIO  = 0.6          # (เดิม 0.8) ลดโอกาสโดนตีว่า sideway ง่ายเกิน
+K_EMA_GAP = 0.5 # ผ่อนจาก 0.7
+K_EMA_SLOPE = 0.35 # ผ่อนจาก 0.45
+K_ATR_RATIO = 0.5 # ผ่อนจาก 0.6
+
 
 # ==== Volume proxy / liquidity ====
-TICK_FREQ_WIN_SEC = 30      # (เดิม 20) ยืดหน้าต่างนับ tick
-MIN_TICKS_PER_WIN = 6       # (เดิม 9) ให้ผ่านง่ายขึ้น (~0.2 tick/sec)
+TICK_FREQ_WIN_SEC = 30
+MIN_TICKS_PER_WIN = 4 # เดิม 6
+
 
 # Reversal trap
-REVERSAL_HIST_MIN = 0.0     # 0 = flip เบา ๆ ก็ตัด; ถ้าอยากมองข้าม flip เล็ก ๆ ลองตั้ง 0.002
+REVERSAL_HIST_MIN = 0.002 # เดิม 0.0
 
-# เกณฑ์ sideway ดั้งเดิม (ถูกแทนด้วย adaptive ภายในฟังก์ชัน)
+
 ATR_PERIOD = 14
+WATCH_WINDOW_SEC = 20
+MIN_PAYOUT = 1.70 # ผ่อนจาก 1.75
 
-# หน้าต่างรอเช็คซ้ำตอนเปิดแท่งใหม่ (WATCH / PRECHECK)
-WATCH_WINDOW_SEC = 20       # (เดิม 15)
-
-# ข้อเสนอ-อัตราจ่ายขั้นต่ำ
-MIN_PAYOUT = 1.75           # ถ้าทดสอบ flow ให้ชัวร์ ลองปรับเป็น 1.70 ชั่วคราวได้
 
 # Risk management
 MAX_TRADES_PER_HOUR = 12
-MAX_DAILY_LOSS      = -100
+MAX_DAILY_LOSS = -100
 DAILY_PROFIT_TARGET = 150
-LOSS_COOLDOWN_SEC   = 120   # แพ้ 1 ไม้ พักสั้น ๆ
-POST_BUY_COOLDOWN   = 20    # หลังซื้อ พักเพื่อกันเข้าไม้ซ้อน
-MAX_CONSEC_LOSSES   = 3     # แพ้ติดกี่ไม้ให้พักยาว
+LOSS_COOLDOWN_SEC = 120
+POST_BUY_COOLDOWN = 20
+MAX_CONSEC_LOSSES = 3
 PAUSE_AFTER_STREAK_SEC = 300
 
-# อื่น ๆ
-OUTLIER_PCT = 0.05          # ตัด tick กระโดด >5%
-PRICE_HISTORY_MAX = 600     # เก็บ close ล่าสุดกี่แท่ง
+
+OUTLIER_PCT = 0.05
+PRICE_HISTORY_MAX = 600
 CANDLES_MAX = 600
-
-# Timeout: ผูกกับ duration
 CONTRACT_TIMEOUT_SEC = DURATION_MIN * 60 + 30
-
-# เริ่มทำงานหลังมีข้อมูลพอ
 MIN_READY_BARS = 30
-
-# Token (ใช้ env ก่อน ถ้าไม่มีก็ fallback)
 API_TOKEN = os.getenv("DERIV_TOKEN", "C82t0gtcRoQv99X")
 
 # ================== LOGGING SETUP ==================
