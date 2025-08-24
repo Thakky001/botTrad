@@ -46,38 +46,38 @@ SCORE_THRESHOLD = 2
 
 
 CANDLE_SECONDS = 60
-CONFIRM_BARS = 2
+CONFIRM_BARS = 1 # ลดจาก 2 เพื่อเข้า WATCH ได้เร็วขึ้น
 HIST_CONSEC_BARS = 1
 
 
-# ==== Adaptive thresholds & robustness ====
-K_EMA_GAP = 0.5 # ผ่อนจาก 0.7
-K_EMA_SLOPE = 0.35 # ผ่อนจาก 0.45
-K_ATR_RATIO = 0.5 # ผ่อนจาก 0.6
+# Adaptive thresholds (ปรับให้อ่อนลงเล็กน้อย)
+K_EMA_GAP = 0.5 # จาก 0.7 → ให้อภัยตลาดแนบเส้น
+K_EMA_SLOPE = 0.3 # จาก 0.45 → ไม่ต้องชันมาก
+K_ATR_RATIO = 0.45 # จาก 0.6 → ให้อภัยตลาด sideway มากขึ้น
 
 
-# ==== Volume proxy / liquidity ====
+SLOPE_WINDOW = 6 # เดิม 7 (ลดเพื่อ sensitivity เร็วขึ้น)
+
+
 TICK_FREQ_WIN_SEC = 30
-MIN_TICKS_PER_WIN = 4 # เดิม 6
+MIN_TICKS_PER_WIN = 4 # จาก 6 → ทำให้ผ่านช่วงกราฟนิ่งได้บ้าง
 
 
-# Reversal trap
-REVERSAL_HIST_MIN = 0.002 # เดิม 0.0
+REVERSAL_HIST_MIN = 0.002 # จาก 0.0 → ป้องกันยกเลิกจาก histogram ผันผวนเล็กน้อย
 
 
 ATR_PERIOD = 14
 WATCH_WINDOW_SEC = 20
-MIN_PAYOUT = 1.70 # ผ่อนจาก 1.75
+MIN_PAYOUT = 1.68 # จาก 1.75 → ให้ผ่านสัญญาที่พอใช้ได้
 
 
-# Risk management
 MAX_TRADES_PER_HOUR = 12
 MAX_DAILY_LOSS = -100
 DAILY_PROFIT_TARGET = 150
-LOSS_COOLDOWN_SEC = 120
-POST_BUY_COOLDOWN = 20
+LOSS_COOLDOWN_SEC = 90 # ลด cooldown ลงเพื่อกลับเข้าไวขึ้น
+POST_BUY_COOLDOWN = 15 # ลด cooldown หลังซื้อ
 MAX_CONSEC_LOSSES = 3
-PAUSE_AFTER_STREAK_SEC = 300
+PAUSE_AFTER_STREAK_SEC = 240
 
 
 OUTLIER_PCT = 0.05
